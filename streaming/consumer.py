@@ -18,7 +18,19 @@ postgres_host = os.getenv("POSTGRES_DB", "localhost")
 
 
 def haversine(lat1, lon1, lat2, lon2):
-    "Udf za racunanje distance na osnovu koordinata"
+    """
+    Calculate the distance between two points on earth given by their coordinates in degrees using the Haversine formula.
+
+    Args:
+        lat1 (float): Latitude of the first coordinate.
+        lon1 (float): Longitude of the first coordinate.
+        lat2 (float): Latitude of the second coordinate.
+        lon2 (float): Longitude of the second coordinate.
+
+
+    Returns:
+        float: Distance in kilometers.
+    """
     # Convert coordinates to radians
     lat1, lon1, lat2, lon2 = map(math.radians, [float(
         lat1), float(lon1), float(lat2), float(lon2)])
@@ -35,34 +47,45 @@ def haversine(lat1, lon1, lat2, lon2):
     return c * r
 
 
+# Registering haversine function as a User-Defined Function (UDF) for Spark
 haversine_udf = func.udf(haversine, DoubleType())
 
 
 def process_batch(df: DataFrame, batch_id):
+    """
+    Processes each batch of data, identifies violations, and writes the data to the appropriate databases.
+
+    Args:
+        df (DataFrame): The input DataFrame.
+        batch_id (int): The batch ID.
+    Returns:
+        -
+    """
     window_spec = Window.partitionBy(
         "car_id", "timestamp").orderBy("avg_distance")
     enriched_df = (
         df.withColumn("rn", func.row_number().over(window_spec))
-        .filter("rn = 1").drop("rn")  # road_segment sa najmanjom avg_distance
+        # road_segment with the smallest avg_distance
+        .filter("rn = 1").drop("rn")
         .withColumn("speed_limit_exceeded",
-                    # Ako je brzina preko limita + 10
+                    # If speed is greater than speed limit + 10
                     func.when(func.col('speed') >
                               (func.col('speed_limit') + func.lit(10)), func.lit(True))
                     .otherwise(func.lit(False))
                     )
         .withColumn("stopping",
-                    # Ako je brzina 0
+                    # If speed is 0
                     func.when(func.col('speed') == func.lit(0),
                               func.lit(True)).otherwise(func.lit(False))
                     )
     )
-    # Upis podataka o saobracaju
+    # Write traffic data
     write_traffic_data_to_influx(enriched_df)
-    # Broj automobila koji vozi preko ogranicenja i upis u influx
+    # Count cars driving over the speed limit and write to InfluxDB
     write_exceeded_speed_counts_to_influx(enriched_df)
-    # Broj automobila koji stoji, (zastoj na putu) i upis u influx
+    # Count stopped cars (traffic jam) and write to InfluxDB
     write_exceeded_stopping_counts_to_influx(enriched_df)
-    # Upisivanje prekoracenja u PostgresDB, kazne
+    # Write speeding violations to PostgreSQL
     write_speed_violations_to_postgres(enriched_df)
 
 
@@ -153,15 +176,7 @@ def write_to_postgres(df: DataFrame):
         )
 
 
-def run():
-    spark = (
-        SparkSession.builder
-        .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.2,org.postgresql:postgresql:42.4.0")
-        .config("spark.sql.shuffle.partitions", "10")
-        .appName("KafkaSparkStreaming")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("ERROR")
+def load_road_segments_data(spark: SparkSession) -> DataFrame:
     road_segment_schema = tp.StructType([
         tp.StructField("road_id", tp.IntegerType()),
         tp.StructField("start_lat", tp.StringType()),
@@ -172,9 +187,19 @@ def run():
         tp.StructField("road_name", tp.StringType())
     ])
 
-    road_segments_df = spark.read.csv(
+    return spark.read.csv(
         "./road_segments.csv", header=True, schema=road_segment_schema)
 
+
+def run():
+    spark = (
+        SparkSession.builder
+        .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.2,org.postgresql:postgresql:42.4.0")
+        .config("spark.sql.shuffle.partitions", "10")
+        .appName("KafkaSparkStreaming")
+        .getOrCreate()
+    )
+    road_segments_df = load_road_segments_data(spark)
     # Define the schema for the incoming data
     schema = tp.StructType([
         tp.StructField("lat", tp.StringType()),
@@ -183,7 +208,6 @@ def run():
         tp.StructField("car_id", tp.IntegerType()),
         tp.StructField("timestamp", tp.TimestampType())
     ])
-
     # Create a DataFrame representing the stream of input from Kafka
     df = (
         spark.readStream
