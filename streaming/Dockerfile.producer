@@ -1,0 +1,8 @@
+FROM python:3.9-slim-buster
+
+RUN pip install kafka-python
+
+COPY route.json /
+COPY producer.py /
+
+CMD sleep infinity

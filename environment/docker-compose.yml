@@ -1,0 +1,157 @@
+version: '3'
+
+services:
+  metabase:
+    image: metabase/metabase
+    ports:
+      - 3000:3000
+    volumes:
+      - metabase-data:/metabase-data
+      
+  db:
+   image: postgres
+   restart: always
+   ports:
+      - 5432:5432
+   environment:
+      # POSTGRES_USER: user def postgres
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: accidents
+   volumes:
+      - local_pgdata:/var/lib/postgresql/data
+  
+  pgadmin:
+   image: dpage/pgadmin4
+   container_name: pgadmin4_container
+   restart: always
+   ports:
+      - "5050:80"
+   environment:
+      PGADMIN_DEFAULT_EMAIL: pgadmin@mail.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+   volumes:
+      - pgadmin-data:/var/lib/pgadmin
+
+  # hdfs dfs -put us_accidents.csv /
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+      - ./source_data/us_accidents.csv:/us_accidents.csv  #TODO:  Make sure to have source_data folder and data 
+    environment:
+      - CLUSTER_NAME=test
+    env_file:
+      - ./hadoop.env
+    ports:
+      - 9870:9870
+      - 9000:9000
+
+  datanode1:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode1
+    depends_on: 
+      - namenode
+    volumes:
+      - hadoop_datanode1:/hadoop/dfs/data
+    env_file:
+      - ./hadoop.env
+
+  datanode2:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode2
+    depends_on: 
+      - namenode
+    volumes:
+      - hadoop_datanode2:/hadoop/dfs/data
+    env_file:
+      - ./hadoop.env
+
+  spark-master:
+    image: bde2020/spark-master:3.3.0-hadoop3.3
+    container_name: spark-master
+    ports:
+      - 8080:8080
+      - 7077:7077
+    environment:
+      - PYSPARK_PYTHON=python3
+    env_file:
+      - ./hadoop.env
+    volumes:
+      - ../batch_processor:/spark/batch_processor
+
+  spark-worker1:
+    image: bde2020/spark-worker:3.3.0-hadoop3.3
+    container_name: spark-worker1
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+    ports:
+      - 8081:8081
+    env_file:
+      - ./hadoop.env
+      
+### Streaming
+  influxdb:
+      image: influxdb:2.0
+      container_name: influxdb
+      restart: always
+      environment:
+        DOCKER_INFLUXDB_INIT_MODE: setup
+        DOCKER_INFLUXDB_INIT_USERNAME: aco
+        DOCKER_INFLUXDB_INIT_PASSWORD: lozinka123
+        DOCKER_INFLUXDB_INIT_ORG: ftn
+        DOCKER_INFLUXDB_INIT_BUCKET: traffic
+        DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: token_influx_aco_admin
+      ports:
+        - "8086:8086"
+      volumes:
+        - influxdb-data:/var/lib/influxdb2
+
+  zookeeper:
+    image: 'bitnami/zookeeper:3'
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    ports:
+      - '2181:2181'
+  kafka:
+    image: 'bitnami/kafka:3'
+    ports:
+      - '9092:9092'
+    environment:
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+    restart: on-failure
+    depends_on:
+      - zookeeper
+
+  producer:
+    build:
+      context: ../streaming/
+      dockerfile: Dockerfile.producer
+    container_name: producer
+    environment:
+      KAFKA_BROKER: kafka:9092
+
+  consumer:
+    build:
+      context: ../streaming/
+      dockerfile: Dockerfile.consumer
+    container_name: consumer
+    environment:
+      KAFKA_BROKER: kafka:9092
+      INFLUXDB_HOST: influxdb
+      POSTGRES_DB: db
+
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode1:
+  hadoop_datanode2:
+  local_pgdata:
+  pgadmin-data:
+  metabase-data:
+  influxdb-data:
